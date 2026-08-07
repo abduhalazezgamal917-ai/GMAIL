@@ -15,17 +15,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 CHANNEL_USERNAME = "@ZenoX_Tools"
 ADMIN_ID = 6043858925
 
-# ================= خادم Flask لبقاء البوت يعمل على Render =================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running perfectly!"
-
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} # لتخزين البريد النشط لكل مستخدم
 user_last_action = {} # للحد من الطلبات (Rate Limiting)
