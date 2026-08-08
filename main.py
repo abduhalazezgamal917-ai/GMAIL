@@ -87,7 +87,6 @@ def callback_query(call):
         bot.answer_callback_query(call.id, "⏳ جاري إنشاء بريد جديد...")
         
         try:
-            # طلب البريد مع إضافة الهيدرز لتخطي الحظر
             req = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", headers=HEADERS, timeout=15).json()
             email = req[0]
             user_emails[user_id] = email 
@@ -101,7 +100,7 @@ def callback_query(call):
             bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
         
         except requests.exceptions.RequestException:
-            bot.send_message(call.message.chat.id, "⚠️ **عذراً!** يبدو أن موقع الإيميلات لا يزال يحظر الاتصال. يرجى الانتظار والمحاولة لاحقاً.")
+            bot.send_message(call.message.chat.id, "⚠️ **عذراً!** يبدو أن موقع الإيميلات يواجه ضغطاً حالياً. يرجى الانتظار والمحاولة لاحقاً.")
 
     elif call.data == "check_inbox":
         if user_id not in user_emails:
@@ -113,7 +112,6 @@ def callback_query(call):
         login, domain = email.split("@")
         
         try:
-            # فحص الرسائل مع إضافة الهيدرز
             req = requests.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}", headers=HEADERS, timeout=15).json()
             
             if len(req) == 0:
@@ -136,8 +134,9 @@ def callback_query(call):
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
     keep_alive()
-    print("Bot is running with Inline Keyboards and API Bypass...")
+    print("Bot is running with Transparent Inline Keyboards and API Bypass...")
     bot.infinity_polling(timeout=20, long_polling_timeout=5)
+
 
 
 
