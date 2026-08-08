@@ -1,5 +1,5 @@
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import time
 import os
@@ -11,13 +11,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 CHANNEL_USERNAME = "@ZenoX_Tools"
 ADMIN_ID = 6043858925
-
-# ================= حيلة تخطي حظر موقع الإيميلات =================
-# هذا سيجعل السيرفر يبدو كمتصفح حقيقي لتجنب الحظر
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Accept": "application/json"
-}
 
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} 
@@ -43,99 +36,111 @@ def is_rate_limited(user_id):
     user_last_action[user_id] = current_time
     return False
 
+# ================= تصميم الأزرار الصلبة (الثابتة أسفل الشاشة) =================
+def main_menu():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(KeyboardButton("📨 إنشاء بريد عشوائي"))
+    markup.add(KeyboardButton("👨‍💻 المطور"))
+    return markup
+
+def email_menu():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(KeyboardButton("🔄 فحص صندوق الوارد"))
+    markup.add(KeyboardButton("🗑️ تغيير البريد"), KeyboardButton("👨‍💻 المطور"))
+    return markup
+
 # ================= أوامر البوت =================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     
+    # فحص الاشتراك الإجباري
     if not check_subscription(user_id):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🌟 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME[1:]}"))
-        markup.add(InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub"))
-        bot.send_message(user_id, "⚠️ **عذراً عزيزي!**\n\nيجب عليك الاشتراك في قناة البوت الرسمية لتتمكن من استخدامه.\nاشترك ثم اضغط على زر التحقق.", reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(user_id, "⚠️ **عذراً عزيزي!**\n\nيجب عليك الاشتراك في القناة لتتمكن من استخدام البوت.\nبعد الاشتراك، أرسل /start مجدداً.", reply_markup=markup, parse_mode="Markdown")
         return
 
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📨 إنشاء بريد عشوائي", callback_data="generate_email"))
-    markup.add(InlineKeyboardButton("👨‍💻 المطور", url=f"tg://user?id={ADMIN_ID}"))
-    
     welcome_text = (
         "👋 **أهلاً بك في بوت البريد المؤقت الذكي!**\n\n"
-        "أنا هنا لمساعدتك في إنشاء عناوين بريد إلكتروني وهمية بضغطة زر لحماية بريدك الأساسي من الرسائل المزعجة (Spam).\n\n"
-        "👇 اضغط على الزر بالأسفل للبدء."
+        "أنا هنا لمساعدتك في إنشاء عناوين بريد إلكتروني وهمية بضغطة زر لحماية بريدك الأساسي.\n\n"
+        "👇 استخدم الأزرار الثابتة بالأسفل للبدء."
     )
-    bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(user_id, welcome_text, reply_markup=main_menu(), parse_mode="Markdown")
 
-# ================= التعامل مع الأزرار الشفافة =================
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    user_id = call.from_user.id
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    user_id = message.from_user.id
+    text = message.text
 
     if is_rate_limited(user_id):
-        bot.answer_callback_query(call.id, "⏳ يرجى الانتظار قليلاً بين الطلبات!", show_alert=True)
+        bot.send_message(user_id, "⏳ يرجى الانتظار قليلاً بين الطلبات...")
         return
 
-    if call.data == "check_sub":
-        if check_subscription(user_id):
-            bot.answer_callback_query(call.id, "✅ تم التحقق بنجاح! يمكنك الآن استخدام البوت.", show_alert=True)
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            send_welcome(call.message)
-        else:
-            bot.answer_callback_query(call.id, "❌ لم تشترك في القناة بعد!", show_alert=True)
+    if not check_subscription(user_id):
+        bot.send_message(user_id, "❌ لم تشترك في القناة بعد! أرسل /start للاشتراك.")
+        return
 
-    elif call.data == "generate_email":
-        bot.answer_callback_query(call.id, "⏳ جاري إنشاء بريد جديد...")
-        
+    # 1. توليد بريد جديد باستخدام Guerrilla Mail (سريع ولا يحظر السيرفرات)
+    if text in ["📨 إنشاء بريد عشوائي", "🗑️ تغيير البريد"]:
+        msg = bot.send_message(user_id, "⏳ جاري توليد بريد إلكتروني حقيقي...")
         try:
-            req = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", headers=HEADERS, timeout=15).json()
-            email = req[0]
+            # طلب بريد جديد من واجهة بديلة مستقرة
+            res = requests.get("https://api.guerrillamail.com/ajax.php?f=get_email_address", timeout=10).json()
+            email = res.get('email_addr')
+            
+            if not email:
+                raise Exception("API Error")
+                
             user_emails[user_id] = email 
             
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔄 فحص صندوق الوارد", callback_data="check_inbox"))
-            markup.add(InlineKeyboardButton("🗑️ تغيير البريد", callback_data="generate_email"))
+            text_msg = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على زر فحص صندوق الوارد."
+            bot.send_message(user_id, text_msg, reply_markup=email_menu(), parse_mode="Markdown")
             
-            text = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على فحص صندوق الوارد."
-            
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
-        
-        except requests.exceptions.RequestException:
-            bot.send_message(call.message.chat.id, "⚠️ **عذراً!** يبدو أن موقع الإيميلات يواجه ضغطاً حالياً. يرجى الانتظار والمحاولة لاحقاً.")
+        except Exception as e:
+            bot.send_message(user_id, "⚠️ حدث خطأ في الاتصال بخادم الإيميلات البديل. حاول مرة أخرى.")
 
-    elif call.data == "check_inbox":
+    # 2. فحص صندوق الوارد واستقبال الرسائل
+    elif text == "🔄 فحص صندوق الوارد":
         if user_id not in user_emails:
-            bot.answer_callback_query(call.id, "⚠️ لم تقم بإنشاء بريد بعد!", show_alert=True)
+            bot.send_message(user_id, "⚠️ لم تقم بإنشاء بريد بعد! اضغط على زر الإنشاء أولاً.")
             return
             
-        bot.answer_callback_query(call.id, "⏳ جاري فحص الرسائل...")
+        msg = bot.send_message(user_id, "⏳ جاري فحص صندوق الوارد...")
         email = user_emails[user_id]
-        login, domain = email.split("@")
         
         try:
-            req = requests.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}", headers=HEADERS, timeout=15).json()
+            # جلب قائمة الرسائل للبريد الحالي
+            res = requests.get(f"https://api.guerrillamail.com/ajax.php?f=get_message_list&offset=0", timeout=10).json()
+            list_mails = res.get('list', [])
             
-            if len(req) == 0:
-                bot.send_message(call.message.chat.id, "📭 صندوق الوارد فارغ. لم تصل أي رسائل بعد.")
+            if not list_mails:
+                bot.send_message(user_id, "📭 صندوق الوارد فارغ. لم تصل أي رسائل حتى الآن.")
             else:
-                for msg in req:
-                    msg_id = msg['id']
-                    read_msg = requests.get(f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}", headers=HEADERS, timeout=15).json()
+                for mail in list_mails:
+                    mail_id = mail.get('mail_id')
+                    sender = mail.get('mail_from', 'غير معروف')
+                    subject = mail.get('mail_subject', 'بدون عنوان')
                     
-                    sender = read_msg.get('from', 'غير معروف')
-                    subject = read_msg.get('subject', 'بدون عنوان')
-                    body = read_msg.get('textBody', 'لا يوجد نص')
+                    # جلب نص الرسالة بالتفصيل
+                    read_res = requests.get(f"https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id={mail_id}", timeout=10).json()
+                    body = read_res.get('mail_body', 'لا يوجد نص')
                     
-                    msg_text = f"📨 **رسالة جديدة!**\n\n**من:** `{sender}`\n**الموضوع:** {subject}\n\n**المحتوى:**\n{body}"
-                    bot.send_message(call.message.chat.id, msg_text, parse_mode="Markdown")
+                    msg_text = f"📨 **رسالة جديدة واردة!**\n\n**من:** `{sender}`\n**الموضوع:** {subject}\n\n**المحتوى:**\n{body}"
+                    bot.send_message(user_id, msg_text, parse_mode="Markdown")
         
-        except requests.exceptions.RequestException:
-            bot.send_message(call.message.chat.id, "⚠️ **حدث خطأ!** فشل الاتصال بخادم الرسائل.")
+        except Exception as e:
+            bot.send_message(user_id, "⚠️ حدث خطأ أثناء جلب الرسائل. حاول مجدداً.")
+
+    elif text == "👨‍💻 المطور":
+        bot.send_message(user_id, f"هذا البوت من تطوير قناتنا: {CHANNEL_USERNAME}\nللتواصل مع المطور: tg://user?id={ADMIN_ID}")
 
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
     keep_alive()
-    print("Bot is running with Transparent Inline Keyboards and API Bypass...")
+    print("Bot is running with Guerrilla API & Reply Keyboards...")
     bot.infinity_polling(timeout=20, long_polling_timeout=5)
+
 
 
 
