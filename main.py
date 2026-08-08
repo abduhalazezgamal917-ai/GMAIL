@@ -1,5 +1,5 @@
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import time
 import os
@@ -11,6 +11,13 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 CHANNEL_USERNAME = "@ZenoX_Tools"
 ADMIN_ID = 6043858925
+
+# ================= حيلة تخطي حظر موقع الإيميلات =================
+# هذا سيجعل السيرفر يبدو كمتصفح حقيقي لتجنب الحظر
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+}
 
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} 
@@ -31,114 +38,106 @@ def check_subscription(user_id):
 def is_rate_limited(user_id):
     current_time = time.time()
     if user_id in user_last_action:
-        # السماح بطلب كل 3 ثوانٍ
         if current_time - user_last_action[user_id] < 3:
             return True
     user_last_action[user_id] = current_time
     return False
-
-# ================= تصميم الأزرار الصلبة (أسفل الشاشة) =================
-def main_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(KeyboardButton("📨 إنشاء بريد عشوائي"))
-    markup.add(KeyboardButton("👨‍💻 المطور"))
-    return markup
-
-def email_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(KeyboardButton("🔄 فحص صندوق الوارد"))
-    markup.add(KeyboardButton("🗑️ تغيير البريد"), KeyboardButton("👨‍💻 المطور"))
-    return markup
 
 # ================= أوامر البوت =================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     
-    # فحص الاشتراك الإجباري
     if not check_subscription(user_id):
-        # ملاحظة: أزرار الروابط الإجبارية يجب أن تكون شفافة لأن الأزرار الصلبة لا تفتح روابط
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🌟 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME[1:]}"))
-        bot.send_message(user_id, "⚠️ **عذراً عزيزي!**\n\nيجب عليك الاشتراك في القناة لتتمكن من استخدام البوت.\nبعد الاشتراك، أرسل /start مجدداً.", reply_markup=markup, parse_mode="Markdown")
+        markup.add(InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub"))
+        bot.send_message(user_id, "⚠️ **عذراً عزيزي!**\n\nيجب عليك الاشتراك في قناة البوت الرسمية لتتمكن من استخدامه.\nاشترك ثم اضغط على زر التحقق.", reply_markup=markup, parse_mode="Markdown")
         return
 
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📨 إنشاء بريد عشوائي", callback_data="generate_email"))
+    markup.add(InlineKeyboardButton("👨‍💻 المطور", url=f"tg://user?id={ADMIN_ID}"))
+    
     welcome_text = (
         "👋 **أهلاً بك في بوت البريد المؤقت الذكي!**\n\n"
-        "أنا هنا لمساعدتك في إنشاء عناوين بريد إلكتروني وهمية بضغطة زر لحماية بريدك الأساسي.\n\n"
-        "👇 استخدم الأزرار التي ظهرت بالأسفل للبدء."
+        "أنا هنا لمساعدتك في إنشاء عناوين بريد إلكتروني وهمية بضغطة زر لحماية بريدك الأساسي من الرسائل المزعجة (Spam).\n\n"
+        "👇 اضغط على الزر بالأسفل للبدء."
     )
-    # إرسال الرسالة مع الأزرار الصلبة
-    bot.send_message(user_id, welcome_text, reply_markup=main_menu(), parse_mode="Markdown")
+    bot.send_message(user_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    user_id = message.from_user.id
-    text = message.text
+# ================= التعامل مع الأزرار الشفافة =================
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    user_id = call.from_user.id
 
     if is_rate_limited(user_id):
-        bot.send_message(user_id, "⏳ يرجى الانتظار قليلاً بين الطلبات...")
+        bot.answer_callback_query(call.id, "⏳ يرجى الانتظار قليلاً بين الطلبات!", show_alert=True)
         return
 
-    if not check_subscription(user_id):
-        bot.send_message(user_id, "❌ لم تشترك في القناة بعد! أرسل /start للاشتراك.")
-        return
+    if call.data == "check_sub":
+        if check_subscription(user_id):
+            bot.answer_callback_query(call.id, "✅ تم التحقق بنجاح! يمكنك الآن استخدام البوت.", show_alert=True)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            send_welcome(call.message)
+        else:
+            bot.answer_callback_query(call.id, "❌ لم تشترك في القناة بعد!", show_alert=True)
 
-    # التفاعل مع الأزرار الصلبة
-    if text in ["📨 إنشاء بريد عشوائي", "🗑️ تغيير البريد"]:
-        msg = bot.send_message(user_id, "⏳ جاري إنشاء بريد جديد وتجهيزه لك...")
+    elif call.data == "generate_email":
+        bot.answer_callback_query(call.id, "⏳ جاري إنشاء بريد جديد...")
+        
         try:
-            req = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", timeout=10).json()
+            # طلب البريد مع إضافة الهيدرز لتخطي الحظر
+            req = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", headers=HEADERS, timeout=15).json()
             email = req[0]
             user_emails[user_id] = email 
             
-            text_msg = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على زر فحص صندوق الوارد."
-            bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text=text_msg, parse_mode="Markdown")
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔄 فحص صندوق الوارد", callback_data="check_inbox"))
+            markup.add(InlineKeyboardButton("🗑️ تغيير البريد", callback_data="generate_email"))
             
-            # تغيير شكل الكيبورد لإظهار زر الفحص
-            bot.send_message(user_id, "الخيارات المتاحة لك الآن:", reply_markup=email_menu())
+            text = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على فحص صندوق الوارد."
             
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
+        
         except requests.exceptions.RequestException:
-            bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text="⚠️ **عذراً!** خادم الإيميلات الخارجي يواجه ضغطاً أو يرفض الاتصال حالياً. جرب مرة أخرى.")
+            bot.send_message(call.message.chat.id, "⚠️ **عذراً!** يبدو أن موقع الإيميلات لا يزال يحظر الاتصال. يرجى الانتظار والمحاولة لاحقاً.")
 
-    elif text == "🔄 فحص صندوق الوارد":
+    elif call.data == "check_inbox":
         if user_id not in user_emails:
-            bot.send_message(user_id, "⚠️ لم تقم بإنشاء بريد بعد! اضغط على زر الإنشاء أولاً.")
+            bot.answer_callback_query(call.id, "⚠️ لم تقم بإنشاء بريد بعد!", show_alert=True)
             return
             
-        msg = bot.send_message(user_id, "⏳ جاري الاتصال بالخادم لفحص الرسائل...")
+        bot.answer_callback_query(call.id, "⏳ جاري فحص الرسائل...")
         email = user_emails[user_id]
         login, domain = email.split("@")
         
         try:
-            req = requests.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}", timeout=10).json()
+            # فحص الرسائل مع إضافة الهيدرز
+            req = requests.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}", headers=HEADERS, timeout=15).json()
             
             if len(req) == 0:
-                bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text="📭 صندوق الوارد فارغ. لم تصل أي رسائل حتى الآن.")
+                bot.send_message(call.message.chat.id, "📭 صندوق الوارد فارغ. لم تصل أي رسائل بعد.")
             else:
-                bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text="📬 توجد رسائل جديدة، جاري جلبها لك...")
-                for m in req:
-                    msg_id = m['id']
-                    read_msg = requests.get(f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}", timeout=10).json()
+                for msg in req:
+                    msg_id = msg['id']
+                    read_msg = requests.get(f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}", headers=HEADERS, timeout=15).json()
                     
                     sender = read_msg.get('from', 'غير معروف')
                     subject = read_msg.get('subject', 'بدون عنوان')
                     body = read_msg.get('textBody', 'لا يوجد نص')
                     
                     msg_text = f"📨 **رسالة جديدة!**\n\n**من:** `{sender}`\n**الموضوع:** {subject}\n\n**المحتوى:**\n{body}"
-                    bot.send_message(user_id, msg_text, parse_mode="Markdown")
+                    bot.send_message(call.message.chat.id, msg_text, parse_mode="Markdown")
         
         except requests.exceptions.RequestException:
-            bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text="⚠️ **حدث خطأ!** فشل الاتصال بخادم الرسائل.")
-
-    elif text == "👨‍💻 المطور":
-        bot.send_message(user_id, f"هذا البوت من تطوير قناتنا: {CHANNEL_USERNAME}\nللتواصل المباشر مع المطور: tg://user?id={ADMIN_ID}")
+            bot.send_message(call.message.chat.id, "⚠️ **حدث خطأ!** فشل الاتصال بخادم الرسائل.")
 
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
     keep_alive()
-    print("Bot is running with Reply Keyboards...")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    print("Bot is running with Inline Keyboards and API Bypass...")
+    bot.infinity_polling(timeout=20, long_polling_timeout=5)
 
 
 
