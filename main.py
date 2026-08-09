@@ -135,6 +135,48 @@ def generate_random_login(length: int = 10):
     return "".join(random.choice(chars) for _ in range(length))
 
 
+def extract_verification_code(subject: str, body: str):
+    """يحاول استخراج رمز تحقق (4-8 أرقام) من الموضوع أو محتوى الرسالة."""
+    import re
+    for text in (subject or "", body or ""):
+        match = re.search(r"\b(\d{4,8})\b", text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def clean_message_body(body: str, max_len: int = 600):
+    """ينظف نص الرسالة من الروابط الطويلة المزعجة (صور/تتبع) ويقصّره."""
+    import re
+    if not body:
+        return ""
+    # إزالة أي رابط طويل (أكثر من 40 حرف) أينما ظهر داخل النص، وليس فقط في بداية السطر
+    text = re.sub(r"https?://\S{40,}", "", body)
+    # تنظيف الأسطر الفارغة الناتجة عن الحذف
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    text = "\n".join(lines).strip()
+    if not text:
+        text = body.strip()
+    if len(text) > max_len:
+        text = text[:max_len].rstrip() + "…"
+    return text
+
+
+def extract_main_link(body: str):
+    """يستخرج أول رابط تحقق/تأكيد فعلي (وليس رابط صورة) من الرسالة."""
+    import re
+    if not body:
+        return None
+    candidates = re.findall(r"https?://\S+", body)
+    for link in candidates:
+        lower = link.lower()
+        if any(skip in lower for skip in [".png", ".jpg", ".jpeg", ".gif", ".svg", "cdn"]):
+            continue
+        return link.rstrip(").,")
+    return None
+
+
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} # لتخزين البريد النشط لكل مستخدم
 user_last_action = {} # للحد من الطلبات (Rate Limiting)
@@ -175,7 +217,14 @@ def send_welcome(message):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🌟 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME[1:]}"))
         markup.add(InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub"))
-        bot.send_message(user_id, "⚠️ **عذراً عزيزي!**\n\nيجب عليك الاشتراك في قناة البوت الرسمية لتتمكن من استخدامه.\nاشترك ثم اضغط على زر التحقق.", reply_markup=markup, parse_mode="Markdown")
+        sub_text = (
+            "🔒 **خطوة أخيرة قبل البدء**\n\n"
+            "هذا البوت مخصص لمشتركي القناة فقط.\n\n"
+            "1️⃣ اضغط \"اشترك في القناة أولاً\"\n"
+            "2️⃣ ثم اضغط \"تحقق من الاشتراك\"\n\n"
+            "وسيفتح لك البوت مباشرة 👇"
+        )
+        bot.send_message(user_id, sub_text, reply_markup=markup, parse_mode="Markdown")
         return
 
     markup = InlineKeyboardMarkup()
@@ -183,9 +232,15 @@ def send_welcome(message):
     markup.add(InlineKeyboardButton("👨‍💻 المطور", url="tg://user?id=6043858925"))
     
     welcome_text = (
-        "👋 **أهلاً بك في بوت البريد المؤقت الذكي!**\n\n"
-        "أنا هنا لمساعدتك في إنشاء عناوين بريد إلكتروني وهمية بضغطة زر لحماية بريدك الأساسي من الرسائل المزعجة (Spam).\n\n"
-        "👇 اضغط على الزر بالأسفل للبدء."
+        "👋 **مرحبًا بك في بوت GMAIL**\n"
+        "بوت البريد الإلكتروني المؤقت الذكي\n\n"
+        "📌 **طريقة الاستخدام:**\n\n"
+        "1️⃣ اضغط \"إنشاء بريد عشوائي\" للحصول على بريد جديد\n"
+        "2️⃣ انسخ البريد واستخدمه في أي موقع أو تطبيق للتسجيل\n"
+        "3️⃣ اضغط \"فحص صندوق الوارد\" لاستقبال الرسائل وروابط/رموز التحقق\n"
+        "4️⃣ عند الحاجة لبريد جديد، اضغط \"تغيير البريد\"\n\n"
+        "🛡️ يحميك هذا من رسائل السبام على بريدك الحقيقي.\n\n"
+        "👇 ابدأ الآن بالضغط على الزر بالأسفل"
     )
     bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -227,7 +282,14 @@ def callback_query(call):
         markup.add(InlineKeyboardButton("🔄 فحص صندوق الوارد", callback_data="check_inbox"))
         markup.add(InlineKeyboardButton("🗑️ تغيير البريد", callback_data="generate_email"))
 
-        text = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على فحص صندوق الوارد."
+        text = (
+            "✅ **تم إنشاء بريدك بنجاح**\n"
+            "━━━━━━━━━━━━━━\n"
+            f"📧 `{email}`\n"
+            "(اضغط على البريد لنسخه)\n\n"
+            "1️⃣ استخدم هذا البريد للتسجيل في أي موقع\n"
+            "2️⃣ اضغط \"فحص صندوق الوارد\" لاستقبال الرسائل ورموز التحقق"
+        )
 
         # تعديل الرسالة السابقة بدلاً من إرسال رسالة جديدة لتجربة مستخدم أفضل
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
@@ -268,14 +330,37 @@ def callback_query(call):
                 if isinstance(sender, dict):  # mail.tm يعيد from كـ {address, name}
                     sender = sender.get('address', 'غير معروف')
                 subject = read_msg.get('subject', 'بدون عنوان')
-                body = read_msg.get('textBody') or read_msg.get('text') or 'لا يوجد نص'
-                if isinstance(body, list):  # بعض الحقول قد تأتي كقائمة
-                    body = "\n".join(body)
-                if len(body) > 3000:
-                    body = body[:3000] + "\n... (تم اقتصاص النص)"
+                raw_body = read_msg.get('textBody') or read_msg.get('text') or ''
+                if isinstance(raw_body, list):  # بعض الحقول قد تأتي كقائمة
+                    raw_body = "\n".join(raw_body)
 
-                msg_text = f"📨 **رسالة جديدة!**\n\n**من:** `{sender}`\n**الموضوع:** {subject}\n\n**المحتوى:**\n{body}"
-                bot.send_message(user_id, msg_text, parse_mode="Markdown")
+                code = extract_verification_code(subject, raw_body)
+                link = extract_main_link(raw_body)
+                clean_body = clean_message_body(raw_body)
+
+                parts = [
+                    "📬 **رسالة جديدة**",
+                    "━━━━━━━━━━━━━━",
+                    f"👤 **من:** `{sender}`",
+                    f"📌 **الموضوع:** {subject}",
+                ]
+                if code:
+                    parts.append(f"\n🔑 **رمز التحقق:** `{code}`")
+                if link:
+                    parts.append(f"\n🔗 **رابط التأكيد:**\n{link}")
+                if clean_body:
+                    parts.append(f"\n📝 **نص الرسالة:**\n{clean_body}")
+
+                msg_text = "\n".join(parts)
+                if len(msg_text) > 4000:
+                    msg_text = msg_text[:4000].rstrip() + "…"
+
+                try:
+                    bot.send_message(user_id, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
+                except Exception as e:
+                    # قد يحتوي محتوى البريد على رموز (* _ ` إلخ) تكسر تنسيق Markdown
+                    print(f"[check_inbox] فشل الإرسال بتنسيق Markdown، إعادة المحاولة كنص عادي: {e}")
+                    bot.send_message(user_id, msg_text, disable_web_page_preview=True)
 
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
@@ -285,6 +370,9 @@ if __name__ == "__main__":
     print("Bot is running...")
     # تشغيل البوت
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+
+
 
 
 
