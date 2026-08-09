@@ -16,7 +16,7 @@ ADMIN_ID = 6043858925
 
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} 
-user_tokens = {} # تمت إضافة قاموس لحفظ مفتاح الجلسة
+user_sessions = {} # تم التحديث لاستخدام Sessions لحفظ ملفات الارتباط (Cookies) بالكامل
 user_last_action = {} 
 
 # ================= دوال مساعدة =================
@@ -83,19 +83,24 @@ def handle_text(message):
         bot.send_message(user_id, "❌ لم تشترك في القناة بعد! أرسل /start للاشتراك.")
         return
 
-    # 1. توليد بريد جديد مع حفظ جلسة الاتصال
+    # 1. توليد بريد جديد مع حفظ الجلسة بالكامل (Cookies + Headers)
     if text in ["📨 إنشاء بريد عشوائي", "🗑️ تغيير البريد"]:
         bot.send_message(user_id, "⏳ جاري توليد بريد إلكتروني حقيقي...")
         try:
-            res = requests.get("https://api.guerrillamail.com/ajax.php?f=get_email_address", timeout=10).json()
-            email = res.get('email_addr')
-            token = res.get('sid_token') # جلب مفتاح الجلسة
+            # إنشاء جلسة (Session) جديدة لكل مستخدم للحفاظ على الاتصال
+            session = requests.Session()
+            # إضافة User-Agent لتجنب حظر الخوادم (Cloudflare وغيرها)
+            session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'})
             
-            if not email or not token:
+            res = session.get("https://api.guerrillamail.com/ajax.php?f=get_email_address", timeout=10)
+            data = res.json()
+            email = data.get('email_addr')
+            
+            if not email:
                 raise Exception("API Error")
                 
             user_emails[user_id] = email 
-            user_tokens[user_id] = token # حفظ المفتاح
+            user_sessions[user_id] = session # حفظ كائن الجلسة بالكامل للاتصالات القادمة
             
             text_msg = f"✅ **تم إنشاء بريدك بنجاح:**\n\n`{email}`\n\n(اضغط على البريد لنسخه)\nاستخدم هذا البريد للتسجيل، ثم اضغط على زر فحص صندوق الوارد."
             bot.send_message(user_id, text_msg, reply_markup=email_menu(), parse_mode="Markdown")
@@ -105,19 +110,24 @@ def handle_text(message):
 
     # 2. فحص صندوق الوارد واستقبال الرسائل
     elif text == "🔄 فحص صندوق الوارد":
-        if user_id not in user_emails or user_id not in user_tokens:
+        if user_id not in user_emails or user_id not in user_sessions:
             bot.send_message(user_id, "⚠️ لم تقم بإنشاء بريد بعد! اضغط على زر الإنشاء أولاً.")
             return
             
         bot.send_message(user_id, "⏳ جاري فحص صندوق الوارد...")
-        token = user_tokens[user_id]
+        session = user_sessions[user_id]
         
         try:
-            # إرسال مفتاح الجلسة مع الطلب لمعرفة صندوق الوارد الصحيح
-            res = requests.get(f"https://api.guerrillamail.com/ajax.php?f=get_message_list&offset=0&sid_token={token}", timeout=10).json()
-            list_mails = res.get('list', [])
+            # استخدام نفس الجلسة (Session) المحفوظة التي تحتوي على ملفات الارتباط الصحيحة
+            res = session.get("https://api.guerrillamail.com/ajax.php?f=get_message_list&offset=0", timeout=10)
+            data = res.json()
+            list_mails = data.get('list', [])
             
-            # تجاهل رسالة الترحيب الافتراضية من خادم الإيميل الوهمي
+            # حماية الكود من الأخطاء إذا أرجع الخادم بيانات غير متوقعة
+            if not isinstance(list_mails, list):
+                list_mails = []
+            
+            # تجاهل رسالة الترحيب الافتراضية
             valid_mails = [m for m in list_mails if m.get('mail_from') != "no-reply@guerrillamail.com"]
             
             if not valid_mails:
@@ -128,16 +138,17 @@ def handle_text(message):
                     sender = mail.get('mail_from', 'غير معروف')
                     subject = mail.get('mail_subject', 'بدون عنوان')
                     
-                    read_res = requests.get(f"https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id={mail_id}&sid_token={token}", timeout=10).json()
-                    body = read_res.get('mail_body', 'لا يوجد نص')
+                    # جلب محتوى الرسالة
+                    read_res = session.get(f"https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id={mail_id}", timeout=10)
+                    read_data = read_res.json()
+                    body = read_data.get('mail_body', 'لا يوجد نص')
                     
-                    # تنظيف نص الرسالة من الأكواد و HTML لتبدو منسقة وواضحة
+                    # تنظيف نص الرسالة من الأكواد و HTML لتبدو منسقة
                     clean_body = re.sub(r'<br\s*/?>', '\n', body, flags=re.IGNORECASE)
                     clean_body = re.sub(r'<[^>]+>', ' ', clean_body)
                     clean_body = html.unescape(clean_body).strip()
                     clean_body_escaped = html.escape(clean_body)
                     
-                    # استخدام HTML parse_mode لتجنب انهيار البوت بسبب العلامات العشوائية
                     msg_text = f"📨 <b>رسالة جديدة واردة!</b>\n\n<b>من:</b> <code>{html.escape(sender)}</code>\n<b>الموضوع:</b> {html.escape(subject)}\n\n<b>المحتوى:</b>\n{clean_body_escaped}"
                     bot.send_message(user_id, msg_text, parse_mode="HTML")
         
@@ -150,7 +161,7 @@ def handle_text(message):
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
     keep_alive()
-    print("Bot is running with Guerrilla API & Reply Keyboards...")
+    print("Bot is running securely with Requests Sessions...")
     bot.infinity_polling(timeout=20, long_polling_timeout=5)
 
 
