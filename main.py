@@ -15,6 +15,133 @@ bot = telebot.TeleBot(BOT_TOKEN)
 CHANNEL_USERNAME = "@ZenoX_Tools"
 ADMIN_ID = 6043858925
 
+# ================= قاعدة بيانات المستخدمين والإحصائيات =================
+import sqlite3
+from datetime import datetime, timedelta
+
+DB_PATH = "bot_data.db"
+
+
+def db_connect():
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_seen TEXT,
+            last_active TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS requests_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def track_user(user_id, username=None):
+    """يسجل المستخدم إذا كان جديدًا، ويحدّث آخر نشاط له."""
+    now = datetime.utcnow().isoformat()
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    exists = cur.fetchone()
+    if exists:
+        cur.execute("UPDATE users SET last_active = ?, username = ? WHERE user_id = ?", (now, username, user_id))
+    else:
+        cur.execute(
+            "INSERT INTO users (user_id, username, first_seen, last_active) VALUES (?, ?, ?, ?)",
+            (user_id, username, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def log_request(user_id, action):
+    """يسجل حدث/طلب معين لأغراض الإحصائيات."""
+    now = datetime.utcnow().isoformat()
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO requests_log (user_id, action, created_at) VALUES (?, ?, ?)",
+        (user_id, action, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_stats():
+    """يحسب إحصائيات دقيقة: مستخدمين نشطين وطلبات، لليوم/7 أيام/30 يوم."""
+    now = datetime.utcnow()
+    today_start = now.strftime("%Y-%m-%d")
+    d7 = (now - timedelta(days=7)).isoformat()
+    d30 = (now - timedelta(days=30)).isoformat()
+
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today_start}%",))
+    active_today = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (d7,))
+    active_7d = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (d30,))
+    active_30d = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM requests_log WHERE created_at LIKE ?", (f"{today_start}%",))
+    requests_today = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM requests_log WHERE created_at >= ?", (d7,))
+    requests_7d = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM requests_log WHERE created_at >= ?", (d30,))
+    requests_30d = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT action, COUNT(*) FROM requests_log
+        WHERE created_at LIKE ?
+        GROUP BY action ORDER BY COUNT(*) DESC
+    """, (f"{today_start}%",))
+    breakdown_today = cur.fetchall()
+
+    conn.close()
+    return {
+        "total_users": total_users,
+        "active_today": active_today,
+        "active_7d": active_7d,
+        "active_30d": active_30d,
+        "requests_today": requests_today,
+        "requests_7d": requests_7d,
+        "requests_30d": requests_30d,
+        "breakdown_today": breakdown_today,
+    }
+
+
+def get_all_user_ids():
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users")
+    ids = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return ids
+
+
+init_db()
+
 # ملاحظة: خادم Flask الخاص بإبقاء البوت حيًا موجود بالفعل في keep_alive.py
 # ويُستدعى عبر keep_alive() في الأسفل، لذا لا حاجة لتكراره هنا.
 
@@ -180,6 +307,8 @@ def extract_main_link(body: str):
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} # لتخزين البريد النشط لكل مستخدم
 user_last_action = {} # للحد من الطلبات (Rate Limiting)
+user_seen_messages = {} # لتتبع الرسائل التي تم عرضها مسبقًا لكل مستخدم (تفادي التكرار)
+admin_waiting_broadcast = {"active": False} # حالة انتظار رسالة الإذاعة من الأدمن
 
 # ================= دوال مساعدة =================
 
@@ -211,6 +340,8 @@ def is_rate_limited(user_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
+    track_user(user_id, message.from_user.username)
+    log_request(user_id, "start")
     
     # فحص الاشتراك
     if not check_subscription(user_id):
@@ -249,6 +380,7 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     user_id = call.from_user.id
+    track_user(user_id, call.from_user.username)
 
     # نظام الحماية من الضغط المستمر
     if is_rate_limited(user_id):
@@ -264,6 +396,7 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "❌ لم تشترك في القناة بعد!", show_alert=True)
 
     elif call.data == "generate_email":
+        log_request(user_id, "generate_email")
         try:
             mailbox = create_temp_email()
         except Exception as e:
@@ -276,6 +409,7 @@ def callback_query(call):
             return
 
         user_emails[user_id] = mailbox  # حفظ بيانات البريد الكاملة (بما فيها التوكن إن وجد)
+        user_seen_messages[user_id] = set()  # تصفير قائمة الرسائل المعروضة سابقًا مع كل بريد جديد
         email = mailbox["address"]
 
         markup = InlineKeyboardMarkup()
@@ -295,6 +429,7 @@ def callback_query(call):
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "check_inbox":
+        log_request(user_id, "check_inbox")
         if user_id not in user_emails:
             bot.answer_callback_query(call.id, "⚠️ لم تقم بإنشاء بريد بعد!", show_alert=True)
             return
@@ -314,53 +449,166 @@ def callback_query(call):
 
         if len(req) == 0:
             bot.answer_callback_query(call.id, "📭 صندوق الوارد فارغ. لم تصل أي رسائل بعد.", show_alert=True)
-        else:
-            bot.answer_callback_query(call.id, "📬 توجد رسائل جديدة!", show_alert=False)
-            for msg in req:
-                msg_id = msg['id']
-                # جلب محتوى الرسالة
-                try:
-                    read_msg = get_message_detail(mailbox, msg_id)
-                except Exception as e:
-                    print(f"[check_inbox] readMessage error: {e}")
-                    bot.send_message(user_id, f"⚠️ تعذر جلب محتوى رسالة.")
-                    continue
+            return
 
-                sender = read_msg.get('from', 'غير معروف')
-                if isinstance(sender, dict):  # mail.tm يعيد from كـ {address, name}
-                    sender = sender.get('address', 'غير معروف')
-                subject = read_msg.get('subject', 'بدون عنوان')
-                raw_body = read_msg.get('textBody') or read_msg.get('text') or ''
-                if isinstance(raw_body, list):  # بعض الحقول قد تأتي كقائمة
-                    raw_body = "\n".join(raw_body)
+        seen = user_seen_messages.setdefault(user_id, set())
+        new_messages = [msg for msg in req if msg['id'] not in seen]
 
-                code = extract_verification_code(subject, raw_body)
-                link = extract_main_link(raw_body)
-                clean_body = clean_message_body(raw_body)
+        if not new_messages:
+            bot.answer_callback_query(
+                call.id, "✅ لا توجد رسائل جديدة (كل الرسائل السابقة تم عرضها).", show_alert=True
+            )
+            return
 
-                parts = [
-                    "📬 **رسالة جديدة**",
-                    "━━━━━━━━━━━━━━",
-                    f"👤 **من:** `{sender}`",
-                    f"📌 **الموضوع:** {subject}",
-                ]
-                if code:
-                    parts.append(f"\n🔑 **رمز التحقق:** `{code}`")
-                if link:
-                    parts.append(f"\n🔗 **رابط التأكيد:**\n{link}")
+        bot.answer_callback_query(call.id, "📬 توجد رسائل جديدة!", show_alert=False)
+        for msg in new_messages:
+            msg_id = msg['id']
+            seen.add(msg_id)  # وضع علامة "تم عرضها" فورًا لتفادي التكرار
+            # جلب محتوى الرسالة
+            try:
+                read_msg = get_message_detail(mailbox, msg_id)
+            except Exception as e:
+                print(f"[check_inbox] readMessage error: {e}")
+                bot.send_message(user_id, f"⚠️ تعذر جلب محتوى رسالة.")
+                continue
+
+            sender = read_msg.get('from', 'غير معروف')
+            if isinstance(sender, dict):  # mail.tm يعيد from كـ {address, name}
+                sender = sender.get('address', 'غير معروف')
+            subject = read_msg.get('subject', 'بدون عنوان')
+            raw_body = read_msg.get('textBody') or read_msg.get('text') or ''
+            if isinstance(raw_body, list):  # بعض الحقول قد تأتي كقائمة
+                raw_body = "\n".join(raw_body)
+
+            code = extract_verification_code(subject, raw_body)
+            link = extract_main_link(raw_body)
+
+            parts = [
+                "✉️ **رسالة جديدة**",
+                f"من: `{sender}`",
+                f"الموضوع: {subject}",
+                "",
+            ]
+            if code:
+                parts.append(f"🔑 كود التحقق:  `{code}`")
+            if link:
+                parts.append(f"🔗 [رابط التحقق]({link})")
+
+            # نعرض النص الكامل فقط إذا لم نجد كود أو رابط (حالة نادرة) لتفادي الحشو
+            if not code and not link:
+                clean_body = clean_message_body(raw_body, max_len=500)
                 if clean_body:
-                    parts.append(f"\n📝 **نص الرسالة:**\n{clean_body}")
+                    parts.append(clean_body)
 
-                msg_text = "\n".join(parts)
-                if len(msg_text) > 4000:
-                    msg_text = msg_text[:4000].rstrip() + "…"
+            msg_text = "\n".join(parts).strip()
+            if len(msg_text) > 4000:
+                msg_text = msg_text[:4000].rstrip() + "…"
 
-                try:
-                    bot.send_message(user_id, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
-                except Exception as e:
-                    # قد يحتوي محتوى البريد على رموز (* _ ` إلخ) تكسر تنسيق Markdown
-                    print(f"[check_inbox] فشل الإرسال بتنسيق Markdown، إعادة المحاولة كنص عادي: {e}")
-                    bot.send_message(user_id, msg_text, disable_web_page_preview=True)
+            try:
+                bot.send_message(user_id, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
+            except Exception as e:
+                # قد يحتوي محتوى البريد على رموز (* _ ` إلخ) تكسر تنسيق Markdown
+                print(f"[check_inbox] فشل الإرسال بتنسيق Markdown، إعادة المحاولة كنص عادي: {e}")
+                bot.send_message(user_id, msg_text, disable_web_page_preview=True)
+
+
+# ================= لوحة الأدمن: الإحصائيات =================
+
+def format_stats_message():
+    s = get_stats()
+    lines = [
+        "📊 **إحصائيات البوت**",
+        "━━━━━━━━━━━━━━━━━━",
+        f"👥 إجمالي المستخدمين: **{s['total_users']}**",
+        "",
+        "**المستخدمون النشطون:**",
+        f"• اليوم: **{s['active_today']}**",
+        f"• آخر 7 أيام: **{s['active_7d']}**",
+        f"• آخر 30 يوم: **{s['active_30d']}**",
+        "",
+        "**عدد الطلبات:**",
+        f"• اليوم: **{s['requests_today']}**",
+        f"• آخر 7 أيام: **{s['requests_7d']}**",
+        f"• آخر 30 يوم: **{s['requests_30d']}**",
+    ]
+    if s["breakdown_today"]:
+        lines.append("")
+        lines.append("**تفاصيل طلبات اليوم:**")
+        action_names = {
+            "start": "بدء تشغيل (/start)",
+            "generate_email": "إنشاء بريد",
+            "check_inbox": "فحص الوارد",
+        }
+        for action, count in s["breakdown_today"]:
+            lines.append(f"• {action_names.get(action, action)}: {count}")
+    return "\n".join(lines)
+
+
+# ================= لوحة الأدمن: الإذاعة التدريجية =================
+
+def run_broadcast(from_chat_id, from_message_id):
+    """يرسل رسالة (أي نوع محتوى) لكل مستخدمي البوت تدريجيًا لتفادي حظر تيليجرام للبوت."""
+    user_ids = get_all_user_ids()
+    sent, failed = 0, 0
+    for uid in user_ids:
+        try:
+            bot.copy_message(uid, from_chat_id, from_message_id)
+            sent += 1
+        except Exception:
+            failed += 1
+        time.sleep(0.07)  # تأخير بسيط بين كل رسالة لتفادي تجاوز حدود تيليجرام
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ **اكتملت الإذاعة**\n\nتم الإرسال بنجاح لـ {sent} مستخدم.\nفشل الإرسال لـ {failed} (على الأغلب حظروا البوت).",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=['broadcast', 'اذاعة'])
+def broadcast_command(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    admin_waiting_broadcast["active"] = True
+    bot.reply_to(
+        message,
+        "📢 **وضع الإذاعة مفعّل**\n\nأرسل الآن الرسالة (نص، صورة، فيديو...) التي تريد إذاعتها لكل مستخدمي البوت.",
+        parse_mode="Markdown",
+    )
+
+
+# ================= معالج النصوص العام (إحصائيات + استقبال محتوى الإذاعة) =================
+
+@bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'document', 'animation'])
+def general_text_handler(message):
+    user_id = message.from_user.id
+
+    # --- استقبال محتوى الإذاعة إن كان الأدمن في وضع الانتظار ---
+    if user_id == ADMIN_ID and admin_waiting_broadcast.get("active"):
+        admin_waiting_broadcast["active"] = False
+        bot.reply_to(message, "🚀 جاري إرسال الإذاعة لكل المستخدمين تدريجيًا...")
+        # تشغيل الإذاعة في Thread منفصل حتى لا تتوقف استجابة البوت للمستخدمين الآخرين أثناء الإرسال
+        threading.Thread(
+            target=run_broadcast,
+            kwargs={
+                "from_chat_id": message.chat.id,
+                "from_message_id": message.message_id,
+            },
+            daemon=True,
+        ).start()
+        return
+
+    # --- أمر الإحصائيات (نصي، للأدمن فقط) ---
+    if message.content_type == "text" and message.text.strip() in ["احصائيات", "إحصائيات"]:
+        if user_id != ADMIN_ID:
+            return  # يتجاهل الطلب تمامًا لغير الأدمن دون أي رد
+        bot.reply_to(message, format_stats_message(), parse_mode="Markdown")
+        return
+
+    # أي رسالة نصية أخرى من مستخدم عادي: لا شيء (تفادي إزعاج المستخدم بردود غير ضرورية)
+
 
 # ================= تشغيل البوت والخادم =================
 if __name__ == "__main__":
@@ -370,6 +618,11 @@ if __name__ == "__main__":
     print("Bot is running...")
     # تشغيل البوت
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+
+
+
+
 
 
 
