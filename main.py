@@ -81,9 +81,10 @@ def log_request(user_id, action):
 
 
 def get_stats():
-    """يحسب إحصائيات دقيقة: مستخدمين نشطين وطلبات، لليوم/7 أيام/30 يوم."""
+    """يحسب إحصائيات دقيقة: مستخدمين نشطين وطلبات، الآن/اليوم/7 أيام/30 يوم."""
     now = datetime.utcnow()
     today_start = now.strftime("%Y-%m-%d")
+    d5min = (now - timedelta(minutes=5)).isoformat()
     d7 = (now - timedelta(days=7)).isoformat()
     d30 = (now - timedelta(days=30)).isoformat()
 
@@ -92,6 +93,9 @@ def get_stats():
 
     cur.execute("SELECT COUNT(*) FROM users")
     total_users = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_active >= ?", (d5min,))
+    active_now = cur.fetchone()[0]
 
     cur.execute("SELECT COUNT(*) FROM users WHERE last_active LIKE ?", (f"{today_start}%",))
     active_today = cur.fetchone()[0]
@@ -121,6 +125,7 @@ def get_stats():
     conn.close()
     return {
         "total_users": total_users,
+        "active_now": active_now,
         "active_today": active_today,
         "active_7d": active_7d,
         "active_30d": active_30d,
@@ -346,14 +351,15 @@ def send_welcome(message):
     # فحص الاشتراك
     if not check_subscription(user_id):
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🌟 اشترك في القناة أولاً", url=f"https://t.me/{CHANNEL_USERNAME[1:]}"))
-        markup.add(InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub"))
+        markup.add(InlineKeyboardButton("📢 انضم إلى قناة البوت", url=f"https://t.me/{CHANNEL_USERNAME[1:]}"))
+        markup.add(InlineKeyboardButton("✅ زر التحقق", callback_data="check_sub"))
+        first_name = message.from_user.first_name or "صديقي"
         sub_text = (
-            "🔒 **خطوة أخيرة قبل البدء**\n\n"
-            "هذا البوت مخصص لمشتركي القناة فقط.\n\n"
-            "1️⃣ اضغط \"اشترك في القناة أولاً\"\n"
-            "2️⃣ ثم اضغط \"تحقق من الاشتراك\"\n\n"
-            "وسيفتح لك البوت مباشرة 👇"
+            f"مرحبًا بك يا {first_name} في بوت GMAIL الذكي 👋\n\n"
+            "طريقة الاستخدام:\n\n"
+            "1️⃣ انضم إلى قناة البوت أولًا\n"
+            "2️⃣ اضغط على زر التحقق\n"
+            "3️⃣ أرسل أمر /start للبدء"
         )
         bot.send_message(user_id, sub_text, reply_markup=markup, parse_mode="Markdown")
         return
@@ -511,37 +517,64 @@ def callback_query(call):
                 print(f"[check_inbox] فشل الإرسال بتنسيق Markdown، إعادة المحاولة كنص عادي: {e}")
                 bot.send_message(user_id, msg_text, disable_web_page_preview=True)
 
+    elif call.data == "refresh_stats":
+        if user_id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "🚫 هذا الزر للأدمن فقط.", show_alert=True)
+            return
+        try:
+            bot.edit_message_text(
+                format_stats_message(),
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=stats_keyboard(),
+                parse_mode="Markdown",
+            )
+            bot.answer_callback_query(call.id, "✅ تم التحديث")
+        except Exception as e:
+            # يحدث لو الإحصائيات نفسها لم تتغير منذ آخر تحديث (تيليجرام يرفض تعديل رسالة بنفس المحتوى)
+            bot.answer_callback_query(call.id, "ℹ️ لا يوجد جديد منذ آخر تحديث.")
+
 
 # ================= لوحة الأدمن: الإحصائيات =================
 
 def format_stats_message():
     s = get_stats()
+    now_str = datetime.utcnow().strftime("%H:%M:%S")
+    action_names = {
+        "start": "🚀 بدء تشغيل (/start)",
+        "generate_email": "📨 إنشاء بريد",
+        "check_inbox": "📬 فحص الوارد",
+    }
     lines = [
-        "📊 **إحصائيات البوت**",
-        "━━━━━━━━━━━━━━━━━━",
-        f"👥 إجمالي المستخدمين: **{s['total_users']}**",
+        "📊 **لوحة إحصائيات بوت GMAIL**",
+        "─────────────────────",
+        f"🟢 **نشطون الآن:** {s['active_now']}",
+        f"👥 **إجمالي المستخدمين:** {s['total_users']}",
         "",
-        "**المستخدمون النشطون:**",
-        f"• اليوم: **{s['active_today']}**",
-        f"• آخر 7 أيام: **{s['active_7d']}**",
-        f"• آخر 30 يوم: **{s['active_30d']}**",
+        "**📈 المستخدمون النشطون**",
+        f"  ▫️ اليوم: {s['active_today']}",
+        f"  ▫️ آخر 7 أيام: {s['active_7d']}",
+        f"  ▫️ آخر 30 يوم: {s['active_30d']}",
         "",
-        "**عدد الطلبات:**",
-        f"• اليوم: **{s['requests_today']}**",
-        f"• آخر 7 أيام: **{s['requests_7d']}**",
-        f"• آخر 30 يوم: **{s['requests_30d']}**",
+        "**📥 عدد الطلبات**",
+        f"  ▫️ اليوم: {s['requests_today']}",
+        f"  ▫️ آخر 7 أيام: {s['requests_7d']}",
+        f"  ▫️ آخر 30 يوم: {s['requests_30d']}",
     ]
     if s["breakdown_today"]:
         lines.append("")
-        lines.append("**تفاصيل طلبات اليوم:**")
-        action_names = {
-            "start": "بدء تشغيل (/start)",
-            "generate_email": "إنشاء بريد",
-            "check_inbox": "فحص الوارد",
-        }
+        lines.append("**🧾 تفاصيل طلبات اليوم**")
         for action, count in s["breakdown_today"]:
-            lines.append(f"• {action_names.get(action, action)}: {count}")
+            lines.append(f"  {action_names.get(action, action)}: {count}")
+    lines.append("")
+    lines.append(f"🕐 آخر تحديث: {now_str} UTC")
     return "\n".join(lines)
+
+
+def stats_keyboard():
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔄 تحديث الإحصائيات", callback_data="refresh_stats"))
+    return markup
 
 
 # ================= لوحة الأدمن: الإذاعة التدريجية =================
@@ -604,7 +637,7 @@ def general_text_handler(message):
     if message.content_type == "text" and message.text.strip() in ["احصائيات", "إحصائيات"]:
         if user_id != ADMIN_ID:
             return  # يتجاهل الطلب تمامًا لغير الأدمن دون أي رد
-        bot.reply_to(message, format_stats_message(), parse_mode="Markdown")
+        bot.reply_to(message, format_stats_message(), reply_markup=stats_keyboard(), parse_mode="Markdown")
         return
 
     # أي رسالة نصية أخرى من مستخدم عادي: لا شيء (تفادي إزعاج المستخدم بردود غير ضرورية)
@@ -618,6 +651,10 @@ if __name__ == "__main__":
     print("Bot is running...")
     # تشغيل البوت
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+
+
+
 
 
 
