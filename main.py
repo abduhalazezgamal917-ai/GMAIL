@@ -15,6 +15,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 CHANNEL_USERNAME = "@ZenoX_Tools"
 ADMIN_ID = 6043858925
 
+# مفتاح VirusTotal لميزة فحص الروابط (مجاني - يُضاف كمتغير بيئة بريندر باسم VT_API_KEY)
+VT_API_KEY = os.getenv("VT_API_KEY")
+
 # ================= قاعدة بيانات المستخدمين والإحصائيات =================
 import sqlite3
 from datetime import datetime, timedelta
@@ -309,11 +312,127 @@ def extract_main_link(body: str):
     return None
 
 
+# ================= ميزة فحص الروابط (VirusTotal) =================
+import base64
+from urllib.parse import urlparse
+
+VT_API_BASE = "https://www.virustotal.com/api/v3"
+
+
+def normalize_url(text: str):
+    """يتحقق أن النص رابط صالح ويضيف http:// تلقائيًا إذا كان المستخدم كتب الدومين فقط."""
+    import re
+    text = text.strip()
+    if not re.match(r"^https?://", text, re.IGNORECASE):
+        text = "http://" + text
+    parsed = urlparse(text)
+    if not parsed.netloc or "." not in parsed.netloc:
+        return None
+    return text
+
+
+def vt_encode_url(url: str) -> str:
+    """يحوّل الرابط لمعرّف Base64 URL-safe بدون padding، كما تطلبه VirusTotal API v3."""
+    return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+
+
+def vt_check_url(url: str):
+    """
+    يفحص رابطًا عبر VirusTotal.
+    يرجع dict فيه: stats (نتائج محركات الفحص) + extra (دومين/تصنيف/تاريخ إن توفرت) + is_new.
+    """
+    headers = {"x-apikey": VT_API_KEY}
+    url_id = vt_encode_url(url)
+
+    resp = requests.get(f"{VT_API_BASE}/urls/{url_id}", headers=headers, timeout=15)
+
+    if resp.status_code == 404:
+        # الرابط غير مفحوص مسبقًا في قاعدة بيانات VirusTotal -> نرسله لفحص جديد
+        submit = requests.post(f"{VT_API_BASE}/urls", headers=headers, data={"url": url}, timeout=15)
+        submit.raise_for_status()
+        analysis_id = submit.json()["data"]["id"]
+
+        time.sleep(8)  # انتظار قصير حتى تكتمل أغلب نتائج الفحص الأولي
+
+        analysis_resp = requests.get(f"{VT_API_BASE}/analyses/{analysis_id}", headers=headers, timeout=15)
+        analysis_resp.raise_for_status()
+        stats = analysis_resp.json()["data"]["attributes"]["stats"]
+        return {"stats": stats, "extra": {}, "is_new": True}
+
+    resp.raise_for_status()
+    attributes = resp.json()["data"]["attributes"]
+    stats = attributes.get("last_analysis_stats", {})
+    extra = {
+        "final_url": attributes.get("last_final_url") or url,
+        "categories": list(set(attributes.get("categories", {}).values())),
+        "first_seen": attributes.get("first_submission_date"),
+    }
+    return {"stats": stats, "extra": extra, "is_new": False}
+
+
+def format_url_report(original_url: str, result: dict) -> str:
+    """يبني رسالة منسقة بنتيجة فحص الرابط."""
+    stats = result["stats"]
+    extra = result.get("extra", {})
+
+    malicious = stats.get("malicious", 0)
+    suspicious = stats.get("suspicious", 0)
+    harmless = stats.get("harmless", 0)
+    undetected = stats.get("undetected", 0)
+    total = malicious + suspicious + harmless + undetected
+
+    if malicious > 0:
+        verdict = "❌ خطير - يحتوي على مؤشرات ضارة"
+    elif suspicious > 0:
+        verdict = "⚠️ مشبوه - يُفضّل الحذر"
+    else:
+        verdict = "✅ آمن - لم يُرصد أي تهديد"
+
+    domain = urlparse(extra.get("final_url", original_url)).netloc or "غير معروف"
+
+    lines = [
+        "🔗 **نتيجة فحص الرابط**",
+        "━━━━━━━━━━━━━━",
+        f"🌐 الدومين: `{domain}`",
+        f"📊 الحكم: {verdict}",
+        "",
+        f"**🧪 تفاصيل الفحص** (من أصل {total or '؟'} محرك أمان)",
+        f"  🔴 ضار: {malicious}",
+        f"  🟠 مشبوه: {suspicious}",
+        f"  🟢 آمن: {harmless}",
+        f"  ⚪ غير مصنف: {undetected}",
+    ]
+
+    if extra.get("categories"):
+        lines.append("")
+        lines.append(f"🏷️ تصنيف الموقع: {', '.join(extra['categories'][:3])}")
+
+    if extra.get("first_seen"):
+        first_seen_date = datetime.utcfromtimestamp(extra["first_seen"]).strftime("%Y-%m-%d")
+        lines.append(f"📅 أول ظهور له بقاعدة البيانات: {first_seen_date}")
+
+    if result.get("is_new"):
+        lines.append("")
+        lines.append("ℹ️ هذا الرابط جديد على قاعدة البيانات، هذه أول نتيجة فحص له.")
+
+    lines += [
+        "",
+        "**💡 نصائح أمان عامة:**",
+        "• لا تدخل بياناتك (باسورد/بطاقة) إلا إذا كنت متأكد 100% من الموقع",
+        "• تأكد أن الرابط يبدأ بـ https وليس http فقط",
+        "• احذر الروابط المختصرة من مصادر غير موثوقة",
+    ]
+
+    return "\n".join(lines)
+
+
 # ================= قواعد البيانات المؤقتة =================
 user_emails = {} # لتخزين البريد النشط لكل مستخدم
 user_last_action = {} # للحد من الطلبات (Rate Limiting)
 user_seen_messages = {} # لتتبع الرسائل التي تم عرضها مسبقًا لكل مستخدم (تفادي التكرار)
 admin_waiting_broadcast = {"active": False} # حالة انتظار رسالة الإذاعة من الأدمن
+user_waiting_url = set() # المستخدمون الذين ننتظر منهم إرسال رابط للفحص
+user_last_url_check = {} # للحد من تكرار فحص الروابط (حماية حصة VirusTotal اليومية)
 
 # ================= دوال مساعدة =================
 
@@ -338,6 +457,15 @@ def is_rate_limited(user_id):
         if current_time - user_last_action[user_id] < 3:
             return True
     user_last_action[user_id] = current_time
+    return False
+
+# 3. حد خاص لفحص الروابط (أبطأ من الحد العام لحماية حصة VirusTotal اليومية)
+def is_url_check_limited(user_id):
+    current_time = time.time()
+    if user_id in user_last_url_check:
+        if current_time - user_last_url_check[user_id] < 15:
+            return True
+    user_last_url_check[user_id] = current_time
     return False
 
 # ================= أوامر البوت =================
@@ -366,13 +494,15 @@ def send_welcome(message):
 
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📨 إنشاء بريد عشوائي", callback_data="generate_email"))
+    markup.add(InlineKeyboardButton("🔗 فحص الروابط", callback_data="check_url_prompt"))
     markup.add(InlineKeyboardButton("👨‍💻 المطور", url="tg://user?id=6043858925"))
     
     welcome_text = (
         "👋 **أهلًا بك في بوت GMAIL**\n\n"
         "1️⃣ إنشاء بريد عشوائي\n"
         "2️⃣ استخدمه للتسجيل بأي موقع\n"
-        "3️⃣ فحص الوارد لاستقبال الرمز/الرابط\n\n"
+        "3️⃣ فحص الوارد لاستقبال الرمز/الرابط\n"
+        "4️⃣ فحص أي رابط مشبوه قبل ما تفتحه 🔗\n\n"
         "🛡️ يحميك من السبام على بريدك الحقيقي"
     )
     bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
@@ -513,6 +643,24 @@ def callback_query(call):
                 print(f"[check_inbox] فشل الإرسال بتنسيق Markdown، إعادة المحاولة كنص عادي: {e}")
                 bot.send_message(user_id, msg_text, disable_web_page_preview=True)
 
+    elif call.data == "check_url_prompt":
+        user_waiting_url.add(user_id)
+        cancel_markup = InlineKeyboardMarkup()
+        cancel_markup.add(InlineKeyboardButton("❌ إلغاء", callback_data="cancel_url_check"))
+        bot.send_message(
+            user_id,
+            "🔗 أرسل الآن الرابط الذي تريد فحصه\n\n(مثال: example.com أو https://example.com)",
+            reply_markup=cancel_markup,
+        )
+
+    elif call.data == "cancel_url_check":
+        user_waiting_url.discard(user_id)
+        bot.answer_callback_query(call.id, "تم الإلغاء")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+
     elif call.data == "refresh_stats":
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "🚫 هذا الزر للأدمن فقط.", show_alert=True)
@@ -540,6 +688,7 @@ def format_stats_message():
         "start": "🚀 بدء تشغيل (/start)",
         "generate_email": "📨 إنشاء بريد",
         "check_inbox": "📬 فحص الوارد",
+        "check_url": "🔗 فحص رابط",
     }
     lines = [
         "📊 **لوحة إحصائيات بوت GMAIL**",
@@ -614,6 +763,45 @@ def broadcast_command(message):
 def general_text_handler(message):
     user_id = message.from_user.id
 
+    # --- معالجة استقبال رابط لفحصه (إن كان المستخدم بانتظار إرسال رابط) ---
+    if message.content_type == "text" and user_id in user_waiting_url:
+        user_waiting_url.discard(user_id)
+        raw_text = message.text.strip()
+
+        if is_url_check_limited(user_id):
+            bot.reply_to(message, "⏳ يرجى الانتظار 15 ثانية على الأقل بين كل فحص رابط وآخر.")
+            return
+
+        normalized = normalize_url(raw_text)
+        if not normalized:
+            bot.reply_to(message, "⚠️ هذا لا يبدو رابطًا صالحًا، أرسل رابطًا صحيحًا (مثال: example.com).")
+            return
+
+        log_request(user_id, "check_url")
+        wait_msg = bot.reply_to(message, "🔎 جاري فحص الرابط، الرجاء الانتظار قليلاً...")
+
+        try:
+            result = vt_check_url(normalized)
+            report = format_url_report(normalized, result)
+            bot.edit_message_text(
+                report,
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            print(f"[check_url] خطأ أثناء فحص الرابط: {e}")
+            try:
+                bot.edit_message_text(
+                    "❌ تعذر فحص الرابط حاليًا (قد تكون حصة الفحص اليومية المجانية انتهت)، حاول لاحقًا.",
+                    chat_id=message.chat.id,
+                    message_id=wait_msg.message_id,
+                )
+            except Exception:
+                pass
+        return
+
     # --- استقبال محتوى الإذاعة إن كان الأدمن في وضع الانتظار ---
     if user_id == ADMIN_ID and admin_waiting_broadcast.get("active"):
         admin_waiting_broadcast["active"] = False
@@ -647,6 +835,12 @@ if __name__ == "__main__":
     print("Bot is running...")
     # تشغيل البوت
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+
+
+
+
+
 
 
 
